@@ -1,0 +1,249 @@
+#!/user/bin/python
+import socket
+import sys
+import os
+
+
+
+class mk_socket:
+    
+    def __init__(self, sid, host, port=21):
+        try:
+           self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)      
+        except socket.error:
+           print ("No se pudo crear el socket")
+        self.s.connect((host, port))
+        if sid==1:
+           print ("El socket se conecto a UP con la direccion == {0}" .format(host))
+        self.sid = str(sid)
+        self.open = True
+
+    def hold_state(self, error):
+        pass
+
+    def cls(self):
+        # don't close the socket more than once
+        if self.open:
+            self.s.close()
+            self.open = False
+
+    def send(self, mes='', filt=''):
+        expected=False
+        CRLF=True
+        print (self.sid, '>>>',)
+
+        try:
+            self.s.send(bytes(mes + ('', '\r\n')[CRLF==True],'utf-8'))
+        except socket.error:
+            self.hold_state('Reiniciar conexion')
+
+        if CRLF:
+            if filt:
+                print (mes.replace(filt, '*'*len(filt)))
+            else:
+                print (mes)
+        return self.recv(expected)
+        
+    def send2(self, mes=""):
+        aux = bytes(mes[True],'utf-8')
+        self.s.send( aux )
+
+    def recv(self,expected=False):
+        print (self.sid, '<<<',)
+
+        try:
+            rec = self.s.recv(1024)
+        except socket.error:
+            self.hold_state('Reiniciar conecion')
+
+        print (rec)
+        return rec
+
+
+class ftp_client:
+
+    def __init__(self):
+        self.buffer_size = 1024
+        self.sock_pasv = False
+
+    def connect(self, host):
+        self.sock = mk_socket(1, host)
+        self.sock.recv()
+
+    def LOGIN(self, usern, passw):
+        self.sock.send('USER '+usern)
+        res = self.sock.send('PASS '+passw, filt=passw)
+
+    def PASV(self):
+
+        if self.sock_pasv:
+            print ('Checking for open socket')
+            assert not self.sock_pasv.open # make sure there is no port open
+        
+        # propose passive connection
+        msg = self.sock.send('PASV')
+        mmsg = msg.decode('utf-8')
+        nmsg = mmsg.split('(')[-1].split(')')[0]
+        print (nmsg)
+        parseo = nmsg.split(',')
+        newip, newport = '.'.join(parseo[:4]), int(parseo[4])*256 + int(parseo[5])
+        print ('Puerto conexion pasivo: {0}' .format(newport))
+        self.sock_pasv = mk_socket(2, newip, newport)
+        return newip, newport
+        
+
+    def DIR(self):
+        
+        self.PASV()
+        self.sock.send('LIST')
+        msg = ''
+        ad = True
+        while ad != '':
+            add = self.sock_pasv.recv()
+            ad = add.decode('utf-8')
+            msg += ad
+        print ('Empty message sent. File list is done.')
+            # there is a CRLF, we know we can close
+        self.sock_pasv.cls()
+        flist = msg.split('\r\n')[:-1]
+        for ele in flist:
+            print (ele)
+            # trigger the expected 226
+        self.sock.recv(226)
+
+        return flist
+        
+    def QUIT(self):
+
+        if self.sock_pasv:
+            if self.sock_pasv.open:
+                print ('Passive port open... closing')
+                self.sock_pasv.cls()
+            else:
+                print ('Passive port already closed')
+        self.sock.send('QUIT')
+        self.sock.cls()
+        
+    def upload(self, fname, fsource):
+        
+        self.PASV()
+        self.sock.send('STOR '+fname)
+
+        my_file = Open(fsource)
+        while my_file.opened:
+            self.sock_pasv.send2(my_file.next(self.buffer_size)) # don't include the CRLF in the file transfer
+
+        self.sock_pasv.cls()
+        print (self.sock.recv())
+        
+        
+    def download(self, fname, fsource):
+        self.PASV()
+        self.sock.send('RETR '+fname)
+        msg = ''
+        ad = True
+        while ad != '':
+            add = self.sock_pasv.recv()
+            ad = add.decode('utf-8')
+            msg += ad
+        self.sock_pasv.cls()
+        file = open(fsource,'w')
+        file.write(msg)
+		
+
+    def RETR(self, rname):
+        self.sock.send('RETR '+rname)
+        
+    def MODE(self, m='S'):
+        self.sock.send('MODE '+m)
+
+    def TYPE(self, t='A'):
+        self.sock.send('TYPE '+t)
+
+    def STRU(self, s='F'):
+        self.sock.send('STRU '+s)
+
+    def CWD(self, dname):
+        self.sock.send('CWD '+dname, 257)
+
+    def MKD(self, dname):
+        self.sock.send('MKD '+dname)
+
+    def PWD(self):
+        self.sock.send('PWD')
+        
+    def DELETE(self, fname):
+        self.sock.send('DELE '+fname)
+        
+    def DELETED(self, dname):
+        self.sock.send('RMD '+dname)
+        
+    def HELP(self, cad):
+        self.sock.send('HELP '+cad)
+        
+    def RNFR(self, fromname, toname):
+         resp = self.sock.send('RNFR ' + fromname)
+         return self.sock.send('RNTO ' + toname)	
+
+    def DLOCAL(self, dir = "/"):
+        stri = '\r\n'.join(os.listdir(dir))
+        print (stri)
+
+    def CDUP(self):
+        self.sock.send('CDUP')
+
+    def do_nothing(self):
+        self.sock.send('NOOP')
+
+class Open:
+
+    def __init__(self, name):
+
+        self.f = open(name, 'r')
+        self.size = os.stat(name)[6]
+        self.pos = 0
+        self.opened = True
+
+    def next(self, buff=1024):
+
+        self.f.seek(self.pos)
+        self.pos += buff
+
+        if self.pos >= self.size:
+            piece = self.f.read(-1)
+            self.f.close()
+            self.opened = False
+        else:
+            piece = self.f.read(buff)
+            
+        return piece
+
+
+
+if __name__ == '__main__':
+
+    MYclient = ftp_client()
+
+    try:
+        MYclient.connect(("192.100.230.21"))
+
+    except socket.error:
+        print ("Could not connect")
+        sys.exit(1)
+
+    MYclient.LOGIN(("userftp"), ("r3d3sf1s1c@s"))
+    
+    MYclient.MODE()    # stream transfer mode
+    MYclient.TYPE('I') # image/binary type
+    MYclient.STRU()    # file structure
+    #MYclient.download('Final.py','/home/samuel/Programas/Documentos/FTP/prueba2.py')
+    #MYclient.PWD()
+    #MYclient.upload('Final2.py', '/home/samuel/Programas/Documentos/FTP/Final.py')
+    #MYclient.upload('prov.py','/home/samuel/Programas/Documentos/FTP/t.py')
+    #MYclient.DIR()
+    #MYclient.upload('rw.py','/home/samuel/Programas/Documentos/FTP/holawq')
+    #MYclient.DIR()
+    #MYclient.RNFR('q','wq')
+    #MYclient.DELETE('Final.py')
+    #MYclient.DELETE('Final2.py')
+    MYclient.DIR()
